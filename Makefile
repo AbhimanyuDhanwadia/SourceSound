@@ -14,7 +14,7 @@ app:
 	codesign --force --deep --sign - dist/SourceSound.app
 
 dmg: app
-	hdiutil create -volname SourceSound -srcfolder dist/SourceSound.app -ov -format UDZO dist/SourceSound-1.5.dmg
+	hdiutil create -volname SourceSound -srcfolder dist/SourceSound.app -ov -format UDZO dist/SourceSound-1.7.dmg
 
 clean:
 	swift package clean

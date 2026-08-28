@@ -12,7 +12,7 @@ struct ContentView: View {
         } detail: {
             mainContent
         }
-        .frame(minWidth: 880, minHeight: 570)
+        .frame(minWidth: 1040, minHeight: 570)
         .background(Color(nsColor: .windowBackgroundColor))
         .alert("SourceSound couldn’t update the route", isPresented: errorBinding) {
             Button("Audio Privacy Settings") { model.openAudioPrivacySettings() }
@@ -195,6 +195,9 @@ private struct ApplicationRouteRow: View {
 
             Spacer(minLength: 18)
 
+            ApplicationVolumeControl(application: application)
+                .frame(width: 130)
+
             routeStatus
                 .frame(width: 74, alignment: .trailing)
 
@@ -252,6 +255,50 @@ private struct ApplicationRouteRow: View {
         return "Open"
     }
 
+}
+
+private struct ApplicationVolumeControl: View {
+    @EnvironmentObject private var model: AppModel
+    let application: AudioApplication
+
+    private var volume: Float {
+        model.volume(for: application)
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: volumeSymbol)
+                    .frame(width: 15)
+                Text("Volume")
+                Spacer(minLength: 2)
+                Text("\(Int((volume * 100).rounded()))%")
+                    .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Slider(value: volumeBinding, in: 0...1, step: 0.01)
+                .controlSize(.small)
+                .accessibilityLabel("\(application.name) volume")
+                .accessibilityValue("\(Int((volume * 100).rounded())) percent")
+        }
+        .help("Set \(application.name)'s volume when routed through SourceSound")
+    }
+
+    private var volumeBinding: Binding<Double> {
+        Binding(
+            get: { Double(volume) },
+            set: { model.setVolume(Float($0), for: application) }
+        )
+    }
+
+    private var volumeSymbol: String {
+        if volume == 0 { return "speaker.slash.fill" }
+        if volume < 0.34 { return "speaker.wave.1.fill" }
+        if volume < 0.67 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
+    }
 }
 
 private struct OutputSelectionMenu: View {
@@ -376,12 +423,13 @@ private struct RoutingHelpView: View {
                 Spacer()
             }
 
-            Text("SourceSound uses Apple’s Core Audio process taps. Choose one or more outputs for any open app; on macOS 26, the route activates immediately and follows the app across audio-process restarts. During routing, macOS captures only that app’s outgoing sound, suppresses its normal playback, and mirrors it to every selected device.")
+            Text("SourceSound uses Apple’s Core Audio process taps. Choose one or more outputs for any open app; on macOS 26, the route activates immediately and follows browser and audio helper restarts. During routing, macOS captures only that app’s outgoing sound, suppresses its normal playback, and sends an independent real-time stream to every selected device—even when it is not the system default.")
 
             VStack(alignment: .leading, spacing: 10) {
                 Label("Your audio never leaves this Mac.", systemImage: "lock.shield")
                 Label("On macOS 14–15, a Waiting route activates when playback begins.", systemImage: "clock.arrow.circlepath")
                 Label("Check multiple outputs to play the same app through all of them.", systemImage: "speaker.wave.2.bubble")
+                Label("Set a separate volume for every routed application.", systemImage: "slider.horizontal.3")
                 Label("Changing back to System Default stops the tap immediately.", systemImage: "arrow.uturn.backward")
                 Label("The first route prompts for System Audio Recording access.", systemImage: "checkmark.shield")
             }
@@ -405,9 +453,10 @@ private struct HowToUseView: View {
     private let steps: [(String, String, String)] = [
         ("1", "Connect your outputs", "Connect headphones, speakers, displays, or USB audio devices before selecting them."),
         ("2", "Choose an app’s outputs", "Open the output menu beside an app. Check one device, or check several to mirror the same audio."),
-        ("3", "Allow audio access", "The first active route asks for System Audio Recording permission. Choose Allow."),
-        ("4", "Start playback", "The status changes to Routed. On macOS 14–15, an idle app may show Waiting until it begins using audio."),
-        ("5", "Return to normal", "Choose System Default to stop that app’s custom route, or use Stop all routes in the sidebar.")
+        ("3", "Set the app volume", "Use the Volume slider in that app’s row. Each application remembers its own level."),
+        ("4", "Allow audio access", "The first active route asks for System Audio Recording permission. Choose Allow."),
+        ("5", "Start playback", "The status changes to Routed. On macOS 14–15, an idle app may show Waiting until it begins using audio."),
+        ("6", "Return to normal", "Choose System Default to stop that app’s custom route, or use Stop all routes in the sidebar.")
     ]
 
     var body: some View {
@@ -419,7 +468,7 @@ private struct HowToUseView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("How to use SourceSound")
                         .font(.title2.bold())
-                    Text("Route an app in five quick steps")
+                    Text("Route and mix an app in six quick steps")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -452,6 +501,6 @@ private struct HowToUseView: View {
             }
         }
         .padding(26)
-        .frame(width: 560)
+        .frame(width: 600)
     }
 }

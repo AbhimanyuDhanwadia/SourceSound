@@ -10,10 +10,12 @@ SourceSound is a native macOS application for routing each app to one or more au
 ## Features
 
 - Route individual applications to different speakers, headphones, displays, or audio interfaces.
+- Set and remember a separate 0–100% volume for every application.
 - Select several outputs for one app and mirror its full stereo signal to all of them.
-- Convert sample rates and channel formats independently for each selected output.
+- Open every selected device independently so non-default USB speakers and headphones work without changing the system output.
+- Synchronize each output with a lock-free real-time ring buffer while Core Audio handles that device's clock and sample-rate conversion.
 - Remember routes by application bundle identifier and restore them after relaunch.
-- Group Chromium audio helpers with their visible parent app, including Microsoft Edge.
+- Group Chromium and WebKit audio helpers with their visible browser, including Microsoft Edge and Safari.
 - Configure idle applications before playback starts on macOS 26.
 - Run entirely on the Mac; SourceSound does not record or upload audio.
 
@@ -52,7 +54,7 @@ Create a distributable disk image:
 
 ```sh
 make dmg
-open dist/SourceSound-1.5.dmg
+open dist/SourceSound-1.7.dmg
 ```
 
 You can also open `Package.swift` directly in Xcode. Testing through the generated `.app` bundle is recommended because it includes the required audio-capture privacy description.
@@ -63,26 +65,30 @@ You can also open `Package.swift` directly in Xcode. Testing through the generat
 2. Open SourceSound. Open foreground applications appear in the **Audio Routes** list.
 3. Open the output menu beside an application.
 4. Check one output to redirect that app, or check several outputs to mirror it to all of them.
-5. Allow **System Audio Recording** when prompted. SourceSound captures only the outgoing audio needed for the active route.
-6. Start playback. The row changes to **Routed** or shows the number of active outputs.
-7. Select **System Default** to remove the custom route, or use **Stop all routes** in the sidebar.
+5. Set that application’s **Volume** slider anywhere from 0–100%. Each app remembers its own value.
+6. Allow **System Audio Recording** when prompted. SourceSound captures only the outgoing audio needed for the active route.
+7. Start playback. The row changes to **Routed** or shows the number of active outputs.
+8. Select **System Default** to remove the custom route, or use **Stop all routes** in the sidebar.
 
 The **How to use** button in the app sidebar presents these instructions at any time. On macOS 14–15, an idle application can display **Waiting** until it connects to Core Audio. On macOS 26, persistent bundle routing can activate before playback and follow audio-process restarts.
 
 ## How routing works
 
-Each route creates an Apple Core Audio process tap for one application. SourceSound suppresses that app's ordinary playback only while the route is active, then sends the captured stereo stream to a private aggregate device containing the selected outputs.
+Each route creates an Apple Core Audio process tap for one application. SourceSound suppresses that app's ordinary playback only while the route is active and places only the tap in a private capture aggregate device, following Apple's capture model.
 
-Every output receives its own renderer. Matching formats are copied as complete stereo buffers; differing sample rates or channel formats pass through an independent Audio Converter. Core Audio drift compensation keeps secondary devices synchronized with the primary clock device.
+Every selected speaker or headphone is opened directly through its own Core Audio HAL output unit. A preallocated, lock-free ring buffer carries the captured stereo frames to each device independently. The HAL performs device-clock and sample-rate conversion, so a 48 kHz browser tap can continuously feed a non-default 44.1 kHz USB speaker without silent buffer tails or requiring that speaker to become the system default.
 
-Audio service and helper bundle identifiers are grouped with their visible parent application. This is required for Chromium-based applications such as Microsoft Edge, whose audio is produced by `com.microsoft.edgemac.helper` rather than its main process.
+Per-app volume is stored independently and delivered to the audio callback through a lock-free C11 atomic. A short gain ramp is applied across each buffer whenever the slider changes, preventing abrupt changes from producing clicks.
+
+Audio service and helper process identifiers are grouped with their visible parent application. This is required for Chromium browsers such as Microsoft Edge, whose audio is produced by `com.microsoft.edgemac.helper`, and Safari, whose audio is produced by `com.apple.WebKit.GPU`. Active routes rebuild automatically when a browser helper starts or restarts.
 
 ## Project structure
 
 | Path | Purpose |
 | --- | --- |
 | `Sources/SourceSound` | SwiftUI application, Core Audio discovery, taps, routing, and rendering |
-| `Tests/SourceSoundTests` | Unit, conversion, live device, Edge-helper, and multi-output lifecycle tests |
+| `Sources/SourceSoundAtomics` | Lock-free, macOS 14-compatible atomic storage for ring-buffer synchronization and volume updates |
+| `Tests/SourceSoundTests` | Unit, ring-buffer, live browser-signal, non-default USB, and simultaneous multi-output tests |
 | `Resources/Info.plist` | macOS bundle metadata and audio-capture privacy description |
 | `Makefile` | Build, test, application bundle, and DMG commands |
 | `Package.swift` | Swift Package Manager manifest |

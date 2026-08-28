@@ -73,6 +73,7 @@ enum CoreAudioSystem {
                 processObjectID: audioProcess?.objectID,
                 pid: runningApp.processIdentifier,
                 bundleID: bundleID,
+                routingProcessObjectIDs: Set(audioProcesses.map(\.objectID)),
                 routingBundleIDs: Set(audioProcesses.map(\.bundleID)).union([
                     bundleID,
                     bundleID + ".helper"
@@ -91,6 +92,7 @@ enum CoreAudioSystem {
                 processObjectID: process.objectID,
                 pid: process.pid,
                 bundleID: ownerBundleID,
+                routingProcessObjectIDs: Set(processes.map(\.objectID)),
                 routingBundleIDs: Set(processes.map(\.bundleID)).union([
                     ownerBundleID,
                     ownerBundleID + ".helper"
@@ -113,11 +115,26 @@ enum CoreAudioSystem {
         openBundleIDs: Set<String>
     ) -> String {
         if openBundleIDs.contains(audioBundleID) { return audioBundleID }
+
+        // Safari's audio is rendered by a launchd-owned WebKit GPU service. Its bundle
+        // identifier is not a descendant of com.apple.Safari, so the normal prefix
+        // association below cannot discover it. Associate the shared WebKit audio
+        // services with Safari only while Safari itself is open.
+        if openBundleIDs.contains("com.apple.Safari"), safariAudioBundleIDs.contains(audioBundleID) {
+            return "com.apple.Safari"
+        }
+
         return openBundleIDs
             .filter { audioBundleID.hasPrefix($0 + ".") }
             .max { $0.count < $1.count }
             ?? audioBundleID
     }
+
+    static let safariAudioBundleIDs: Set<String> = [
+        "com.apple.WebKit.GPU",
+        "com.apple.WebKit.Networking",
+        "com.apple.WebKit.WebContent"
+    ]
 
     private static func displayName(for bundleID: String) -> String {
         let bundle = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)

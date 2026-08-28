@@ -8,13 +8,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var applications: [AudioApplication] = []
     @Published private(set) var devices: [AudioOutputDevice] = []
     @Published private(set) var routeStates: [String: RouteState] = [:]
+    @Published private(set) var applicationVolumes: [String: Float] = [:]
     @Published var searchText = ""
     @Published var lastError: String?
     @Published private(set) var isRefreshing = false
 
     private var activeRoutes: [String: AudioRoute] = [:]
+    private var pendingRouteTokens: [String: UUID] = [:]
     private var refreshTimer: Timer?
+    private let routeCreationQueue = DispatchQueue(
+        label: "app.sourcesound.route-creation",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+    private let routeStartTimeout: TimeInterval = 8
     private let preferencesKey = "SourceSound.RoutingChoices"
+    private let volumePreferencesKey = "SourceSound.ApplicationVolumes"
     private let logger = Logger(subsystem: "app.sourcesound.mac", category: "Routing")
 
     private static let legacyBundleID = "app.soundsource.mac"
@@ -34,7 +43,22 @@ final class AppModel: ObservableObject {
 
     init() {
         migrateLegacyPreferencesIfNeeded()
-        refresh()
+        applicationVolumes = savedVolumes()
+
+        // Construct the first SwiftUI window before restoring saved Core Audio
+        // routes. Creating a tap or opening a hardware device can block while a
+        // driver wakes, and doing that here prevents the application window from
+        // appearing at all.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            self.refresh()
+            self.startRefreshTimer()
+        }
+    }
+
+    private func startRefreshTimer() {
+        guard refreshTimer == nil else { return }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh(silent: true) }
         }
@@ -68,6 +92,20 @@ final class AppModel: ObservableObject {
         routeStates[application.bundleID] ?? .inactive
     }
 
+    func volume(for application: AudioApplication) -> Float {
+        applicationVolumes[application.bundleID] ?? ApplicationVolumePreferences.defaultVolume
+    }
+
+    func setVolume(_ volume: Float, for application: AudioApplication) {
+        let volume = ApplicationVolumePreferences.clamped(volume)
+        applicationVolumes[application.bundleID] = volume
+        UserDefaults.standard.set(
+            ApplicationVolumePreferences.encode(applicationVolumes),
+            forKey: volumePreferencesKey
+        )
+        activeRoutes[application.bundleID]?.volume = volume
+    }
+
     func toggle(deviceUID: String, for application: AudioApplication) {
         var selection = selectedDeviceUIDs(for: application)
         if selection.contains(deviceUID) {
@@ -87,6 +125,7 @@ final class AppModel: ObservableObject {
     }
 
     func select(deviceUIDs: Set<String>, for application: AudioApplication) {
+        pendingRouteTokens.removeValue(forKey: application.bundleID)
         if let existing = activeRoutes.removeValue(forKey: application.bundleID) {
             existing.stop()
         }
@@ -115,20 +154,65 @@ final class AppModel: ObservableObject {
         }
 
         routeStates[application.bundleID] = .starting
-        do {
-            let route = try AudioRoute(application: application, outputDevices: connectedDevices)
-            activeRoutes[application.bundleID] = route
-            routeStates[application.bundleID] = .active(deviceUIDs: route.deviceUIDs)
-            logger.notice("Activated \(application.bundleID, privacy: .public) on \(route.deviceUIDs.count) output(s)")
-            lastError = nil
-        } catch {
-            routeStates[application.bundleID] = .failed(message: error.localizedDescription)
-            logger.error("Failed \(application.bundleID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            lastError = error.localizedDescription
+        let token = UUID()
+        let bundleID = application.bundleID
+        let routeVolume = volume(for: application)
+        pendingRouteTokens[bundleID] = token
+
+        routeCreationQueue.async { [weak self] in
+            let result = Result {
+                try AudioRoute(
+                    application: application,
+                    outputDevices: connectedDevices,
+                    volume: routeVolume
+                )
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    if case let .success(route) = result { route.stop() }
+                    return
+                }
+                guard self.pendingRouteTokens[bundleID] == token else {
+                    if case let .success(route) = result { route.stop() }
+                    return
+                }
+
+                self.pendingRouteTokens.removeValue(forKey: bundleID)
+                switch result {
+                case let .success(route):
+                    guard self.savedPreferences()[bundleID] == deviceUIDs else {
+                        route.stop()
+                        return
+                    }
+                    self.activeRoutes[bundleID] = route
+                    self.routeStates[bundleID] = .active(deviceUIDs: route.deviceUIDs)
+                    self.logger.notice(
+                        "Activated \(bundleID, privacy: .public) on \(route.deviceUIDs.count) output(s)"
+                    )
+                    self.lastError = nil
+                case let .failure(error):
+                    self.routeStates[bundleID] = .failed(message: error.localizedDescription)
+                    self.logger.error(
+                        "Failed \(bundleID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                    self.lastError = error.localizedDescription
+                }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + routeStartTimeout) { [weak self] in
+            guard let self, self.pendingRouteTokens[bundleID] == token else { return }
+            self.pendingRouteTokens.removeValue(forKey: bundleID)
+            let message = "Starting the audio route timed out. Check the output connection, then select it again."
+            self.routeStates[bundleID] = .failed(message: message)
+            self.logger.error("Timed out starting \(bundleID, privacy: .public)")
+            self.lastError = message
         }
     }
 
     func stopAllRoutes() {
+        pendingRouteTokens.removeAll()
         activeRoutes.values.forEach { $0.stop() }
         activeRoutes.removeAll()
         routeStates = Dictionary(uniqueKeysWithValues: applications.map { ($0.bundleID, .inactive) })
@@ -142,6 +226,11 @@ final class AppModel: ObservableObject {
 
     private func reconcileRoutes() {
         let liveBundleIDs = Set(applications.map(\.bundleID))
+        let stalePendingBundleIDs = pendingRouteTokens.keys.filter { !liveBundleIDs.contains($0) }
+        for bundleID in stalePendingBundleIDs {
+            pendingRouteTokens.removeValue(forKey: bundleID)
+            routeStates[bundleID] = .inactive
+        }
         let staleBundleIDs = activeRoutes.keys.filter { !liveBundleIDs.contains($0) }
         for bundleID in staleBundleIDs {
             activeRoutes.removeValue(forKey: bundleID)?.stop()
@@ -156,7 +245,9 @@ final class AppModel: ObservableObject {
             let connectedSelectedUIDs = Set(devices.lazy.map(\.uid).filter(selectedUIDs.contains))
             let outputSetChanged = route.deviceUIDs != connectedSelectedUIDs
             let routingIdentityChanged = route.routingBundleIDs != application.routingBundleIDs
-            if processRestarted || outputSetChanged || routingIdentityChanged {
+            let routingProcessesChanged = route.routingProcessObjectIDs
+                != application.routingProcessObjectIDs
+            if processRestarted || outputSetChanged || routingIdentityChanged || routingProcessesChanged {
                 activeRoutes.removeValue(forKey: application.bundleID)?.stop()
                 routeStates[application.bundleID] = .inactive
             }
@@ -172,6 +263,8 @@ final class AppModel: ObservableObject {
                 routeStates[application.bundleID] = .waiting(deviceUIDs: deviceUIDs)
             } else if case .failed = routeStates[application.bundleID] {
                 continue
+            } else if case .starting = routeStates[application.bundleID] {
+                continue
             } else {
                 select(deviceUIDs: deviceUIDs, for: application)
             }
@@ -180,6 +273,12 @@ final class AppModel: ObservableObject {
 
     private func savedPreferences() -> [String: Set<String>] {
         RoutingPreferences.decode(UserDefaults.standard.dictionary(forKey: preferencesKey) ?? [:])
+    }
+
+    private func savedVolumes() -> [String: Float] {
+        ApplicationVolumePreferences.decode(
+            UserDefaults.standard.dictionary(forKey: volumePreferencesKey) ?? [:]
+        )
     }
 
     private func migrateLegacyPreferencesIfNeeded() {

@@ -13,11 +13,17 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "SourceSound",
+            dependencies: ["SourceSoundAtomics"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AudioToolbox")
             ]
+        ),
+        .target(
+            name: "SourceSoundAtomics",
+            path: "Sources/SourceSoundAtomics",
+            publicHeadersPath: "include"
         ),
         .testTarget(
             name: "SourceSoundTests",

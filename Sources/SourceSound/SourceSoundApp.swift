@@ -11,7 +11,7 @@ struct SourceSoundApp: App {
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
-        .defaultSize(width: 980, height: 650)
+        .defaultSize(width: 1120, height: 650)
 
         Settings {
             VStack(alignment: .leading, spacing: 12) {

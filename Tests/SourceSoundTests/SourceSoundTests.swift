@@ -34,23 +34,95 @@ final class SourceSoundTests: XCTestCase {
         )
     }
 
-    func testAggregateDescriptionMirrorsToMultipleOutputs() {
-        let outputs = [
-            AudioOutputDevice(objectID: 1, uid: "speaker", name: "Speakers", transportType: 0),
-            AudioOutputDevice(objectID: 2, uid: "headphones", name: "Headphones", transportType: 0)
+    func testApplicationVolumePreferencesClampAndRoundTrip() {
+        let decoded = ApplicationVolumePreferences.decode([
+            "com.example.quiet": 0.25,
+            "com.example.loud": 0.8,
+            "com.example.tooLoud": 2.0,
+            "com.example.negative": -1.0,
+            "com.example.invalid": Double.nan
+        ])
+
+        XCTAssertEqual(decoded["com.example.quiet"], 0.25)
+        XCTAssertEqual(decoded["com.example.loud"], 0.8)
+        XCTAssertEqual(decoded["com.example.tooLoud"], 1)
+        XCTAssertEqual(decoded["com.example.negative"], 0)
+        XCTAssertEqual(decoded["com.example.invalid"], 1)
+        XCTAssertEqual(
+            ApplicationVolumePreferences.encode(decoded)["com.example.quiet"],
+            0.25
+        )
+    }
+
+    func testRealtimeVolumeClampsAndPublishesChanges() {
+        let volume = RealtimeVolume(0.4)
+        XCTAssertEqual(volume.value, 0.4, accuracy: 0.0001)
+
+        volume.value = 1.5
+        XCTAssertEqual(volume.value, 1)
+
+        volume.value = -0.5
+        XCTAssertEqual(volume.value, 0)
+
+        volume.value = .nan
+        XCTAssertEqual(volume.value, 1)
+    }
+
+    func testRealtimeUInt32PublishesChanges() {
+        let value = RealtimeUInt32(42)
+        XCTAssertEqual(value.value, 42)
+        value.value = 9001
+        XCTAssertEqual(value.value, 9001)
+        XCTAssertEqual(value.increment(), 9001)
+        XCTAssertEqual(value.value, 9002)
+    }
+
+    func testRealtimeRingBufferPrefillsAndRendersCompleteStereoFrames() {
+        let ring = RealtimeAudioRingBuffer(
+            capacityFrames: 16,
+            channels: 2,
+            initialGain: 0.5
+        )
+        var input: [Float] = [
+            0.2, -0.2,
+            0.4, -0.4,
+            0.6, -0.6,
+            0.8, -0.8,
+            1.0, -1.0,
+            0.8, -0.8,
+            0.6, -0.6,
+            0.4, -0.4
         ]
-        let description = AudioRoute.makeAggregateDescription(
+        var output = Array(repeating: Float.zero, count: 8)
+
+        input.withUnsafeMutableBufferPointer { pointer in
+            ring.write(AudioBuffer(pointer, numberOfChannels: 2))
+        }
+        let status = output.withUnsafeMutableBufferPointer { pointer -> OSStatus in
+            var outputList = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(pointer, numberOfChannels: 2)
+            )
+            return ring.render(frameCount: 4, to: &outputList, targetGain: 0.5)
+        }
+
+        XCTAssertEqual(status, noErr)
+        XCTAssertEqual(output, [0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4])
+        XCTAssertFalse(output.suffix(2).allSatisfy { $0 == 0 })
+    }
+
+    func testCaptureAggregateDescriptionContainsOnlyTheTap() {
+        let description = AudioRoute.makeCaptureAggregateDescription(
             tapUID: "tap",
-            outputDevices: outputs,
             routeUID: "route"
         )
 
-        XCTAssertEqual(description[kAudioAggregateDeviceMainSubDeviceKey] as? String, "speaker")
-        XCTAssertEqual(description[kAudioAggregateDeviceIsStackedKey] as? Bool, false)
-        let subdevices = description[kAudioAggregateDeviceSubDeviceListKey] as? [[String: Any]]
-        XCTAssertEqual(subdevices?.count, 2)
-        XCTAssertEqual(subdevices?[0][kAudioSubDeviceDriftCompensationKey] as? Bool, false)
-        XCTAssertEqual(subdevices?[1][kAudioSubDeviceDriftCompensationKey] as? Bool, true)
+        XCTAssertNil(description[kAudioAggregateDeviceMainSubDeviceKey])
+        XCTAssertNil(description[kAudioAggregateDeviceSubDeviceListKey])
+        let taps = description[kAudioAggregateDeviceTapListKey] as? [[String: Any]]
+        XCTAssertEqual(taps?.count, 1)
+        XCTAssertEqual(taps?.first?[kAudioSubTapUIDKey] as? String, "tap")
+        XCTAssertEqual(taps?.first?[kAudioSubTapDriftCompensationKey] as? Bool, false)
     }
 
     func testPersistentTapDescriptionRoutesByBundleIdentifier() throws {
@@ -67,6 +139,7 @@ final class SourceSoundTests: XCTestCase {
         let description = AudioRoute.makePersistentTapDescription(for: safari)
 
         XCTAssertEqual(description.bundleIDs, ["com.apple.Safari"])
+        XCTAssertEqual(description.processes, [])
         XCTAssertTrue(description.isProcessRestoreEnabled)
         XCTAssertTrue(description.isMixdown)
         XCTAssertFalse(description.isExclusive)
@@ -80,6 +153,24 @@ final class SourceSoundTests: XCTestCase {
         )
 
         XCTAssertEqual(owner, "com.microsoft.edgemac")
+    }
+
+    func testSafariWebKitAudioServiceUsesVisibleSafariApplication() {
+        let owner = CoreAudioSystem.routingOwnerBundleID(
+            for: "com.apple.WebKit.GPU",
+            openBundleIDs: ["com.apple.Safari", "com.openai.codex"]
+        )
+
+        XCTAssertEqual(owner, "com.apple.Safari")
+    }
+
+    func testWebKitAudioServiceIsNotClaimedWhenSafariIsClosed() {
+        let owner = CoreAudioSystem.routingOwnerBundleID(
+            for: "com.apple.WebKit.GPU",
+            openBundleIDs: ["com.openai.codex"]
+        )
+
+        XCTAssertEqual(owner, "com.apple.WebKit.GPU")
     }
 
     func testPersistentTapIncludesEdgeAudioHelperBundle() throws {
@@ -100,6 +191,7 @@ final class SourceSoundTests: XCTestCase {
             Set(description.bundleIDs),
             ["com.microsoft.edgemac", "com.microsoft.edgemac.helper"]
         )
+        XCTAssertEqual(description.processes, [189])
     }
 
     func testAudioApplicationRetainsAllRoutingBundleIdentifiers() {
@@ -107,6 +199,7 @@ final class SourceSoundTests: XCTestCase {
             processObjectID: 189,
             pid: 33078,
             bundleID: "com.microsoft.edgemac",
+            routingProcessObjectIDs: [189, 190],
             routingBundleIDs: ["com.microsoft.edgemac", "com.microsoft.edgemac.helper"],
             name: "Microsoft Edge",
             isProducingAudio: true
@@ -116,6 +209,7 @@ final class SourceSoundTests: XCTestCase {
             "com.microsoft.edgemac",
             "com.microsoft.edgemac.helper"
         ])
+        XCTAssertEqual(edge.routingProcessObjectIDs, [189, 190])
     }
 
     func testLiveEdgeAudioHelperRouteStartsOnSelectedOutput() throws {
@@ -142,11 +236,38 @@ final class SourceSoundTests: XCTestCase {
         )
         XCTAssertTrue(edge.routingBundleIDs.contains("com.microsoft.edgemac.helper"))
 
+        let processDeadline = Date().addingTimeInterval(3)
+        var helperProcessIDs = Set<AudioObjectID>()
+        repeat {
+            let processIDs = try CoreAudioSystem.audioObjectIDArrayProperty(
+                objectID: CoreAudioSystem.systemObject,
+                selector: kAudioHardwarePropertyProcessObjectList
+            )
+            helperProcessIDs = Set(processIDs.filter { processID in
+                let bundleID = try? CoreAudioSystem.stringProperty(
+                    objectID: processID,
+                    selector: kAudioProcessPropertyBundleID
+                )
+                return bundleID == "com.microsoft.edgemac.helper"
+            })
+            if helperProcessIDs.isEmpty { Thread.sleep(forTimeInterval: 0.05) }
+        } while helperProcessIDs.isEmpty && Date() < processDeadline
+        XCTAssertFalse(helperProcessIDs.isEmpty)
+        let routedEdge = AudioApplication(
+            processObjectID: helperProcessIDs.first,
+            pid: edge.pid,
+            bundleID: edge.bundleID,
+            routingProcessObjectIDs: helperProcessIDs,
+            routingBundleIDs: edge.routingBundleIDs,
+            name: edge.name,
+            isProducingAudio: true
+        )
+
         let outputs = try CoreAudioSystem.outputDevices()
         let selectedOutput = try XCTUnwrap(
             outputs.first { $0.uid == "BuiltInSpeakerDevice" } ?? outputs.first
         )
-        let route = try AudioRoute(application: edge, outputDevices: [selectedOutput])
+        let route = try AudioRoute(application: routedEdge, outputDevices: [selectedOutput])
 
         XCTAssertTrue(route.isRunning)
         XCTAssertEqual(route.deviceUIDs, [selectedOutput.uid])
@@ -154,6 +275,218 @@ final class SourceSoundTests: XCTestCase {
 
         route.stop()
         XCTAssertFalse(route.isRunning)
+    }
+
+    func testLiveSafariAudioReachesNonDefaultExternalOutputRoute() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Persistent bundle routing requires macOS 26.")
+        }
+        let safari = try XCTUnwrap(
+            CoreAudioSystem.audioApplications().first { $0.bundleID == "com.apple.Safari" }
+        )
+        guard safari.isProducingAudio else {
+            throw XCTSkip("Safari is not currently producing audio.")
+        }
+        XCTAssertTrue(safari.routingBundleIDs.contains("com.apple.WebKit.GPU"))
+
+        let defaultOutputID: AudioObjectID = try CoreAudioSystem.scalarProperty(
+            objectID: CoreAudioSystem.systemObject,
+            selector: kAudioHardwarePropertyDefaultOutputDevice
+        )
+        let externalOutput = try XCTUnwrap(
+            CoreAudioSystem.outputDevices().first {
+                $0.objectID != defaultOutputID
+                    && $0.transportType == kAudioDeviceTransportTypeUSB
+            },
+            "A non-default USB output is required for the live external-route test."
+        )
+
+        let route = try AudioRoute(
+            application: safari,
+            outputDevices: [externalOutput],
+            diagnosticsEnabled: true
+        )
+        defer { route.stop() }
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, !route.renderDiagnostics.receivedNonSilentAudio {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+
+        let diagnostics = route.renderDiagnostics
+        print(
+            "Safari external route: \(externalOutput.name), input frames: \(diagnostics.inputFrames), "
+                + "output frames: \(diagnostics.outputFrames), signal: \(diagnostics.receivedNonSilentAudio)"
+        )
+        XCTAssertGreaterThan(diagnostics.inputFrames, 0)
+        XCTAssertGreaterThan(diagnostics.outputFrames, 0)
+        XCTAssertTrue(diagnostics.receivedNonSilentAudio)
+    }
+
+    func testLiveEdgeBrowserAudioReachesNonDefaultExternalOutputRoute() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Persistent bundle routing requires macOS 26.")
+        }
+        let edge = try XCTUnwrap(
+            CoreAudioSystem.audioApplications().first { $0.bundleID == "com.microsoft.edgemac" }
+        )
+        XCTAssertTrue(edge.routingBundleIDs.contains("com.microsoft.edgemac.helper"))
+
+        let processDeadline = Date().addingTimeInterval(3)
+        var helperProcessIDs = Set<AudioObjectID>()
+        repeat {
+            let processIDs = try CoreAudioSystem.audioObjectIDArrayProperty(
+                objectID: CoreAudioSystem.systemObject,
+                selector: kAudioHardwarePropertyProcessObjectList
+            )
+            helperProcessIDs = Set(processIDs.filter { processID in
+                let bundleID = try? CoreAudioSystem.stringProperty(
+                    objectID: processID,
+                    selector: kAudioProcessPropertyBundleID
+                )
+                return bundleID == "com.microsoft.edgemac.helper"
+            })
+            if helperProcessIDs.isEmpty { Thread.sleep(forTimeInterval: 0.05) }
+        } while helperProcessIDs.isEmpty && Date() < processDeadline
+        let routedEdge = AudioApplication(
+            processObjectID: helperProcessIDs.first,
+            pid: edge.pid,
+            bundleID: edge.bundleID,
+            routingProcessObjectIDs: helperProcessIDs,
+            routingBundleIDs: edge.routingBundleIDs,
+            name: edge.name,
+            isProducingAudio: !helperProcessIDs.isEmpty
+        )
+
+        let defaultOutputID: AudioObjectID = try CoreAudioSystem.scalarProperty(
+            objectID: CoreAudioSystem.systemObject,
+            selector: kAudioHardwarePropertyDefaultOutputDevice
+        )
+        let deviceIDs = try CoreAudioSystem.audioObjectIDArrayProperty(
+            objectID: CoreAudioSystem.systemObject,
+            selector: kAudioHardwarePropertyDevices
+        )
+        print("Live browser test devices:", deviceIDs.map { deviceID in
+            let transport: UInt32 = (try? CoreAudioSystem.scalarProperty(
+                objectID: deviceID,
+                selector: kAudioDevicePropertyTransportType
+            )) ?? kAudioDeviceTransportTypeUnknown
+            let name = (try? CoreAudioSystem.stringProperty(
+                objectID: deviceID,
+                selector: kAudioObjectPropertyName
+            )) ?? "unknown"
+            return "\(deviceID):\(transport):\(name)"
+        })
+        let builtInDeviceID = try XCTUnwrap(
+            deviceIDs.first { deviceID in
+                let uid = (try? CoreAudioSystem.stringProperty(
+                    objectID: deviceID,
+                    selector: kAudioDevicePropertyDeviceUID
+                )) ?? ""
+                return uid == "BuiltInSpeakerDevice"
+            }
+        )
+        let builtInOutput = AudioOutputDevice(
+            objectID: builtInDeviceID,
+            uid: "BuiltInSpeakerDevice",
+            name: "MacBook Air Speakers",
+            transportType: kAudioDeviceTransportTypeBuiltIn
+        )
+        let builtInRoute = try AudioRoute(
+            application: routedEdge,
+            outputDevices: [builtInOutput],
+            diagnosticsEnabled: true
+        )
+        let builtInDeadline = Date().addingTimeInterval(3)
+        while Date() < builtInDeadline,
+              !(builtInRoute.renderDiagnostics.receivedNonSilentAudio
+                && builtInRoute.renderDiagnostics.outputFrames > 0) {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        let builtInDiagnostics = builtInRoute.renderDiagnostics
+        print(
+            "Edge built-in route: input frames: \(builtInDiagnostics.inputFrames), "
+                + "output frames: \(builtInDiagnostics.outputFrames), "
+                + "signal: \(builtInDiagnostics.receivedNonSilentAudio)"
+        )
+        builtInRoute.stop()
+        XCTAssertGreaterThan(builtInDiagnostics.inputFrames, 0)
+        XCTAssertGreaterThan(builtInDiagnostics.outputFrames, 0)
+        XCTAssertTrue(builtInDiagnostics.receivedNonSilentAudio)
+
+        let externalDeviceID = try XCTUnwrap(
+            deviceIDs.first { deviceID in
+                let uid = (try? CoreAudioSystem.stringProperty(
+                    objectID: deviceID,
+                    selector: kAudioDevicePropertyDeviceUID
+                )) ?? ""
+                return deviceID != defaultOutputID && uid.hasPrefix("AppleUSBAudioEngine:")
+            },
+            "A non-default USB output is required for the live browser-route test."
+        )
+        let externalOutput = AudioOutputDevice(
+            objectID: externalDeviceID,
+            uid: try CoreAudioSystem.stringProperty(
+                objectID: externalDeviceID,
+                selector: kAudioDevicePropertyDeviceUID
+            ),
+            name: try CoreAudioSystem.stringProperty(
+                objectID: externalDeviceID,
+                selector: kAudioObjectPropertyName
+            ),
+            transportType: kAudioDeviceTransportTypeUSB
+        )
+        let route = try AudioRoute(
+            application: routedEdge,
+            outputDevices: [externalOutput],
+            diagnosticsEnabled: true
+        )
+        defer { route.stop() }
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline,
+              !(route.renderDiagnostics.receivedNonSilentAudio
+                && route.renderDiagnostics.outputFrames > 0) {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+
+        let diagnostics = route.renderDiagnostics
+        print(
+            "Edge browser route: \(externalOutput.name), input frames: \(diagnostics.inputFrames), "
+                + "output frames: \(diagnostics.outputFrames), signal: \(diagnostics.receivedNonSilentAudio)"
+        )
+        XCTAssertGreaterThan(diagnostics.inputFrames, 0)
+        XCTAssertGreaterThan(diagnostics.outputFrames, 0)
+        XCTAssertTrue(diagnostics.receivedNonSilentAudio)
+        route.stop()
+
+        let mirroredRoute = try AudioRoute(
+            application: routedEdge,
+            outputDevices: [builtInOutput, externalOutput],
+            diagnosticsEnabled: true
+        )
+        defer { mirroredRoute.stop() }
+        let mirroredDeadline = Date().addingTimeInterval(5)
+        while Date() < mirroredDeadline {
+            let counts = mirroredRoute.outputRenderFrameCounts
+            if mirroredRoute.renderDiagnostics.receivedNonSilentAudio,
+               counts[builtInOutput.uid, default: 0] > 0,
+               counts[externalOutput.uid, default: 0] > 0 {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        let mirroredCounts = mirroredRoute.outputRenderFrameCounts
+        print("Edge mirrored output frames:", mirroredCounts)
+        XCTAssertTrue(mirroredRoute.renderDiagnostics.receivedNonSilentAudio)
+        XCTAssertGreaterThan(mirroredCounts[builtInOutput.uid, default: 0], 0)
+        XCTAssertGreaterThan(mirroredCounts[externalOutput.uid, default: 0], 0)
+
+        Thread.sleep(forTimeInterval: 2)
+        let callbackCounts = mirroredRoute.outputRenderCallbackCounts
+        print("Edge mirrored callback counts after stress window:", callbackCounts)
+        XCTAssertGreaterThan(callbackCounts[builtInOutput.uid, default: 0], 50)
+        XCTAssertGreaterThan(callbackCounts[externalOutput.uid, default: 0], 50)
     }
 
     func testMacOS26IdleApplicationCanRouteWithoutProcessObject() throws {
@@ -277,9 +610,8 @@ final class SourceSoundTests: XCTestCase {
         )
         let tapUID = try CoreAudioSystem.tapUIDProperty(objectID: tapID)
         let selectedOutputs = Array(outputs.prefix(2))
-        let aggregateDescription = AudioRoute.makeAggregateDescription(
+        let aggregateDescription = AudioRoute.makeCaptureAggregateDescription(
             tapUID: tapUID,
-            outputDevices: selectedOutputs,
             routeUID: "SourceSound.FormatTest.\(UUID().uuidString)"
         )
         try CoreAudioSystem.check(
@@ -304,30 +636,26 @@ final class SourceSoundTests: XCTestCase {
         let inputFormats: [AudioStreamBasicDescription] = try inputStreams.map {
             try CoreAudioSystem.scalarProperty(objectID: $0, selector: kAudioStreamPropertyVirtualFormat)
         }
-        let outputFormats: [AudioStreamBasicDescription] = try outputStreams.map {
-            try CoreAudioSystem.scalarProperty(objectID: $0, selector: kAudioStreamPropertyVirtualFormat)
-        }
-        let renderers = try outputFormats.map {
-            try AudioStreamRenderer(inputFormat: tapFormat, outputFormat: $0)
+        let volume = RealtimeVolume(1)
+        let hardwareOutputs = try selectedOutputs.map {
+            try HardwareAudioOutput(
+                device: $0,
+                sourceFormat: tapFormat,
+                volume: volume,
+                diagnosticOutputFrames: nil
+            )
         }
 
         print("Tap format: \(Self.describe(tapFormat))")
         print("Input formats: \(inputFormats.map(Self.describe).joined(separator: "; "))")
-        print("Output formats: \(outputFormats.map(Self.describe).joined(separator: "; "))")
         XCTAssertFalse(inputFormats.isEmpty)
-        XCTAssertEqual(renderers.count, 2)
-        for renderer in renderers {
-            if renderer.requiresConversion {
-                XCTAssertNotEqual(
-                    Self.describe(renderer.inputFormat),
-                    Self.describe(renderer.outputFormat)
-                )
-            } else {
-                XCTAssertEqual(
-                    Self.describe(renderer.inputFormat),
-                    Self.describe(renderer.outputFormat)
-                )
-            }
+        XCTAssertTrue(outputStreams.isEmpty)
+        XCTAssertEqual(hardwareOutputs.count, 2)
+        for output in hardwareOutputs {
+            try output.start()
+            XCTAssertTrue(output.isRunning)
+            output.stop()
+            XCTAssertFalse(output.isRunning)
         }
     }
 
@@ -351,10 +679,18 @@ final class SourceSoundTests: XCTestCase {
             isProducingAudio: false
         )
         let selectedOutputs = Array(outputs.prefix(2))
-        let route = try AudioRoute(application: application, outputDevices: selectedOutputs)
+        let route = try AudioRoute(
+            application: application,
+            outputDevices: selectedOutputs,
+            volume: 0.35
+        )
 
         XCTAssertTrue(route.isRunning)
         XCTAssertEqual(route.deviceUIDs, Set(selectedOutputs.map(\.uid)))
+        XCTAssertEqual(route.volume, 0.35, accuracy: 0.0001)
+
+        route.volume = 0.62
+        XCTAssertEqual(route.volume, 0.62, accuracy: 0.0001)
 
         route.stop()
         XCTAssertFalse(route.isRunning)
@@ -435,6 +771,102 @@ final class SourceSoundTests: XCTestCase {
         XCTAssertEqual(secondOutput, input)
     }
 
+    func testMatchingFormatRendererAppliesIndependentApplicationVolume() throws {
+        let format = Self.floatStereoFormat(sampleRate: 48_000)
+        let renderer = try AudioStreamRenderer(
+            inputFormat: format,
+            outputFormat: format,
+            initialGain: 0.5
+        )
+        var input: [Float] = [1, -1, 0.8, -0.8, 0.4, -0.4, 0.2, -0.2]
+        var output = Array(repeating: Float.zero, count: input.count)
+
+        let status = input.withUnsafeMutableBufferPointer { inputPointer in
+            output.withUnsafeMutableBufferPointer { outputPointer in
+                renderer.render(
+                    input: AudioBuffer(inputPointer, numberOfChannels: 2),
+                    output: AudioBuffer(outputPointer, numberOfChannels: 2),
+                    gain: 0.5
+                )
+            }
+        }
+
+        XCTAssertEqual(status, noErr)
+        XCTAssertEqual(output, input.map { $0 * 0.5 })
+    }
+
+    func testVolumeChangeRampsAcrossBufferWithoutAClick() throws {
+        let format = Self.floatStereoFormat(sampleRate: 48_000)
+        let renderer = try AudioStreamRenderer(
+            inputFormat: format,
+            outputFormat: format,
+            initialGain: 1
+        )
+        var input = Array(repeating: Float(1), count: 8)
+        var output = Array(repeating: Float.zero, count: input.count)
+
+        let status = input.withUnsafeMutableBufferPointer { inputPointer in
+            output.withUnsafeMutableBufferPointer { outputPointer in
+                renderer.render(
+                    input: AudioBuffer(inputPointer, numberOfChannels: 2),
+                    output: AudioBuffer(outputPointer, numberOfChannels: 2),
+                    gain: 0
+                )
+            }
+        }
+
+        XCTAssertEqual(status, noErr)
+        XCTAssertEqual(output, [0.75, 0.75, 0.5, 0.5, 0.25, 0.25, 0, 0])
+    }
+
+    func testSampleRateConverterAppliesVolumeToEveryMirroredOutput() throws {
+        let inputFormat = Self.floatStereoFormat(sampleRate: 48_000)
+        let outputFormat = Self.floatStereoFormat(sampleRate: 44_100)
+        let firstRenderer = try AudioStreamRenderer(
+            inputFormat: inputFormat,
+            outputFormat: outputFormat,
+            initialGain: 0.25
+        )
+        let secondRenderer = try AudioStreamRenderer(
+            inputFormat: inputFormat,
+            outputFormat: outputFormat,
+            initialGain: 0.25
+        )
+        let inputFrames = 480
+        let outputFrames = 441
+        var input = (0..<(inputFrames * 2)).map { sample -> Float in
+            let frame = sample / 2
+            return sin(Float(frame) * 2 * .pi * 440 / 48_000) * 0.5
+        }
+        var firstOutput = Array(repeating: Float.zero, count: outputFrames * 2)
+        var secondOutput = Array(repeating: Float.zero, count: outputFrames * 2)
+
+        let firstStatus = input.withUnsafeMutableBufferPointer { inputPointer in
+            firstOutput.withUnsafeMutableBufferPointer { outputPointer in
+                firstRenderer.render(
+                    input: AudioBuffer(inputPointer, numberOfChannels: 2),
+                    output: AudioBuffer(outputPointer, numberOfChannels: 2),
+                    gain: 0.25
+                )
+            }
+        }
+        let secondStatus = input.withUnsafeMutableBufferPointer { inputPointer in
+            secondOutput.withUnsafeMutableBufferPointer { outputPointer in
+                secondRenderer.render(
+                    input: AudioBuffer(inputPointer, numberOfChannels: 2),
+                    output: AudioBuffer(outputPointer, numberOfChannels: 2),
+                    gain: 0.25
+                )
+            }
+        }
+
+        XCTAssertEqual(firstStatus, noErr)
+        XCTAssertEqual(secondStatus, noErr)
+        XCTAssertEqual(firstOutput, secondOutput)
+        XCTAssertGreaterThan(firstOutput.map { abs($0) }.max() ?? 0, 0.02)
+        XCTAssertLessThanOrEqual(firstOutput.map { abs($0) }.max() ?? 0, 0.15)
+    }
+
     func testSampleRateConverterHandlesConsecutiveRealtimeBuffers() throws {
         let inputFormat = Self.floatStereoFormat(sampleRate: 48_000)
         let outputFormat = Self.floatStereoFormat(sampleRate: 44_100)
@@ -442,7 +874,7 @@ final class SourceSoundTests: XCTestCase {
         let inputFrames = 480
         let outputFrames = 441
 
-        for chunk in 0..<20 {
+        for chunk in 0..<1_000 {
             var input = (0..<(inputFrames * 2)).map { sample -> Float in
                 let frame = chunk * inputFrames + sample / 2
                 return sin(Float(frame) * 2 * .pi * 440 / 48_000) * 0.5
@@ -464,6 +896,33 @@ final class SourceSoundTests: XCTestCase {
                 0.1,
                 "Converter produced silence on realtime chunk \(chunk)"
             )
+        }
+    }
+
+    func testSampleRateConverterDoesNotLeaveEqualSizedExternalOutputBuffersSilent() throws {
+        let inputFormat = Self.floatStereoFormat(sampleRate: 48_000)
+        let outputFormat = Self.floatStereoFormat(sampleRate: 44_100)
+        let renderer = try AudioStreamRenderer(inputFormat: inputFormat, outputFormat: outputFormat)
+        let frameCount = 512
+
+        for chunk in 0..<20 {
+            var input = (0..<(frameCount * 2)).map { sample -> Float in
+                let frame = chunk * frameCount + sample / 2
+                return sin(Float(frame) * 2 * .pi * 440 / 48_000) * 0.5
+            }
+            var output = Array(repeating: Float.zero, count: frameCount * 2)
+            let status = input.withUnsafeMutableBufferPointer { inputPointer in
+                output.withUnsafeMutableBufferPointer { outputPointer in
+                    renderer.render(
+                        input: AudioBuffer(inputPointer, numberOfChannels: 2),
+                        output: AudioBuffer(outputPointer, numberOfChannels: 2)
+                    )
+                }
+            }
+
+            XCTAssertEqual(status, noErr)
+            let silentTail = output.suffix(64).allSatisfy { abs($0) < 0.000_001 }
+            XCTAssertFalse(silentTail, "Chunk \(chunk) ended with a silent conversion gap")
         }
     }
 

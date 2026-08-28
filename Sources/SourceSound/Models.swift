@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct AudioApplication: Identifiable, Hashable {
     let processObjectID: AudioObjectID?
+    let routingProcessObjectIDs: Set<AudioObjectID>
     let pid: pid_t
     let bundleID: String
     let routingBundleIDs: Set<String>
@@ -15,11 +16,15 @@ struct AudioApplication: Identifiable, Hashable {
         processObjectID: AudioObjectID?,
         pid: pid_t,
         bundleID: String,
+        routingProcessObjectIDs: Set<AudioObjectID>? = nil,
         routingBundleIDs: Set<String>? = nil,
         name: String,
         isProducingAudio: Bool
     ) {
         self.processObjectID = processObjectID
+        self.routingProcessObjectIDs = routingProcessObjectIDs
+            ?? processObjectID.map { [$0] }
+            ?? []
         self.pid = pid
         self.bundleID = bundleID
         self.routingBundleIDs = (routingBundleIDs ?? [bundleID]).union([bundleID])
@@ -88,6 +93,26 @@ enum RoutingPreferences {
         preferences.compactMapValues { selection in
             selection.isEmpty ? nil : selection.sorted()
         }
+    }
+}
+
+enum ApplicationVolumePreferences {
+    static let defaultVolume: Float = 1
+
+    static func decode(_ raw: [String: Any]) -> [String: Float] {
+        raw.compactMapValues { value in
+            guard let number = value as? NSNumber else { return nil }
+            return clamped(number.floatValue)
+        }
+    }
+
+    static func encode(_ volumes: [String: Float]) -> [String: Double] {
+        volumes.mapValues { Double(clamped($0)) }
+    }
+
+    static func clamped(_ volume: Float) -> Float {
+        guard volume.isFinite else { return defaultVolume }
+        return min(max(volume, 0), 1)
     }
 }
 
