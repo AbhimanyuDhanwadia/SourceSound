@@ -215,6 +215,77 @@ enum CoreAudioSystem {
         return list.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
+    static func outputPresentationLatencySeconds(deviceID: AudioObjectID) -> TimeInterval {
+        let sampleRate: Double = (try? scalarProperty(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyNominalSampleRate
+        )) ?? 0
+        guard sampleRate > 0 else { return 0 }
+
+        let deviceLatency: UInt32 = (try? scalarProperty(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyLatency,
+            scope: kAudioDevicePropertyScopeOutput
+        )) ?? 0
+        let safetyOffset: UInt32 = (try? scalarProperty(
+            objectID: deviceID,
+            selector: kAudioDevicePropertySafetyOffset,
+            scope: kAudioDevicePropertyScopeOutput
+        )) ?? 0
+        let bufferFrames: UInt32 = (try? scalarProperty(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyBufferFrameSize,
+            scope: kAudioDevicePropertyScopeOutput
+        )) ?? (try? scalarProperty(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyBufferFrameSize
+        )) ?? 0
+        let streams = (try? audioObjectIDArrayProperty(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyStreams,
+            scope: kAudioDevicePropertyScopeOutput
+        )) ?? []
+        let streamLatency = streams.reduce(UInt32(0)) { maximum, streamID in
+            let latency: UInt32 = (try? scalarProperty(
+                objectID: streamID,
+                selector: kAudioStreamPropertyLatency
+            )) ?? 0
+            return max(maximum, latency)
+        }
+
+        let totalFrames = UInt64(deviceLatency)
+            + UInt64(streamLatency)
+            + UInt64(safetyOffset)
+            + UInt64(bufferFrames)
+        return Double(totalFrames) / sampleRate
+    }
+
+    static func outputPresentationLatencySeconds(for device: AudioOutputDevice) -> TimeInterval {
+        let measured = outputPresentationLatencySeconds(deviceID: device.objectID)
+        if measured > 0 { return measured }
+
+        // Some host contexts expose the output device but withhold its latency
+        // properties. These conservative transport defaults preserve synchronization
+        // until the initialized AUHAL can report a device-specific value.
+        if device.uid == "BuiltInSpeakerDevice" { return 0.0335 }
+        if device.uid == "BuiltInHeadphoneOutputDevice" { return 0.0155 }
+        if device.uid.hasPrefix("AppleUSBAudioEngine:") { return 0.0137 }
+        switch device.transportType {
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE:
+            return 0.18
+        case kAudioDeviceTransportTypeAirPlay:
+            return 2.0
+        case kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeDisplayPort:
+            return 0.05
+        case kAudioDeviceTransportTypeBuiltIn:
+            return 0.025
+        case kAudioDeviceTransportTypeUSB:
+            return 0.014
+        default:
+            return 0.02
+        }
+    }
+
     static func propertyAddress(
         _ selector: AudioObjectPropertySelector,
         scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,

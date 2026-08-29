@@ -12,6 +12,8 @@ SourceSound is a native macOS application for routing each app to one or more au
 - Route individual applications to different speakers, headphones, displays, or audio interfaces.
 - Set and remember a separate 0–100% volume for every application.
 - Select several outputs for one app and mirror its full stereo signal to all of them.
+- Automatically compensate for speaker, headphone, USB, Bluetooth, and display latency when mirroring an app.
+- Pin frequently used applications to the top of the route list with a persistent star control.
 - Open every selected device independently so non-default USB speakers and headphones work without changing the system output.
 - Synchronize each output with a lock-free real-time ring buffer while Core Audio handles that device's clock and sample-rate conversion.
 - Remember routes by application bundle identifier and restore them after relaunch.
@@ -55,7 +57,7 @@ Create a distributable disk image:
 
 ```sh
 make dmg
-open dist/SourceSound-1.8.dmg
+open dist/SourceSound-1.9.dmg
 ```
 
 You can also open `Package.swift` directly in Xcode. Testing through the generated `.app` bundle is recommended because it includes the required audio-capture privacy description.
@@ -64,12 +66,13 @@ You can also open `Package.swift` directly in Xcode. Testing through the generat
 
 1. Connect every output you want to use, such as headphones, speakers, displays, or USB audio devices.
 2. Open SourceSound. Open foreground applications appear in the **Audio Routes** list.
-3. Open the output menu beside an application.
-4. Check one output to redirect that app, or check several outputs to mirror it to all of them.
-5. Set that application’s **Volume** slider anywhere from 0–100%. Each app remembers its own value.
-6. Allow **System Audio Recording** when prompted. SourceSound captures only the outgoing audio needed for the active route.
-7. Start playback. The row changes to **Routed** or shows the number of active outputs.
-8. Select **System Default** to remove the custom route, or use **Stop all routes** in the sidebar.
+3. Select the star beside frequently used applications to keep them at the top of the list.
+4. Open the output menu beside an application.
+5. Check one output to redirect that app, or check several outputs to mirror it to all of them.
+6. Set that application’s **Volume** slider anywhere from 0–100%. Each app remembers its own value.
+7. Allow **System Audio Recording** when prompted. SourceSound captures only the outgoing audio needed for the active route.
+8. Start playback. The row changes to **Routed** or shows the number of active outputs.
+9. Select **System Default** to remove the custom route, or use **Stop all routes** in the sidebar.
 
 The **How to use** button in the app sidebar presents these instructions at any time. On macOS 14–15, an idle application can display **Waiting** until it connects to Core Audio. On macOS 26, persistent bundle routing can activate before playback and follow audio-process restarts.
 
@@ -78,6 +81,8 @@ The **How to use** button in the app sidebar presents these instructions at any 
 Each route creates an Apple Core Audio process tap for one application. SourceSound suppresses that app's ordinary playback only while the route is active and places only the tap in a private capture aggregate device, following Apple's capture model.
 
 Every selected speaker or headphone is opened directly through its own Core Audio HAL output unit. A preallocated, lock-free ring buffer carries the captured stereo frames to each device independently. The HAL performs device-clock and sample-rate conversion, so a 48 kHz browser tap can continuously feed a non-default 44.1 kHz USB speaker without silent buffer tails or requiring that speaker to become the system default.
+
+For mirrored playback, SourceSound reads each output’s device latency, stream latency, safety offset, and hardware buffer size, then checks the initialized HAL unit’s presentation latency. It delays only the faster paths inside their preallocated ring buffers so the same source frame reaches built-in and external speakers together. Conservative transport-specific values are used when a driver withholds latency metadata.
 
 Per-app volume is stored independently and delivered to the audio callback through a lock-free C11 atomic. A short gain ramp is applied across each buffer whenever the slider changes, preventing abrupt changes from producing clicks.
 

@@ -54,6 +54,44 @@ final class SourceSoundTests: XCTestCase {
         )
     }
 
+    func testPinnedApplicationsPersistAndSortAheadOfOtherApps() {
+        let decoded = PinnedApplicationPreferences.decode([
+            "com.example.edge", "", "com.example.edge"
+        ])
+        XCTAssertEqual(decoded, ["com.example.edge"])
+        XCTAssertEqual(PinnedApplicationPreferences.encode(decoded), ["com.example.edge"])
+
+        let spotify = AudioApplication(
+            processObjectID: nil,
+            pid: 1,
+            bundleID: "com.example.spotify",
+            name: "Spotify",
+            isProducingAudio: true
+        )
+        let safari = AudioApplication(
+            processObjectID: nil,
+            pid: 2,
+            bundleID: "com.example.safari",
+            name: "Safari",
+            isProducingAudio: false
+        )
+        let edge = AudioApplication(
+            processObjectID: nil,
+            pid: 3,
+            bundleID: "com.example.edge",
+            name: "Edge",
+            isProducingAudio: false
+        )
+
+        let ordered = ApplicationListOrdering.pinnedFirst(
+            [spotify, safari, edge],
+            pinnedBundleIDs: decoded
+        )
+        XCTAssertEqual(ordered.map(\.bundleID), [
+            "com.example.edge", "com.example.spotify", "com.example.safari"
+        ])
+    }
+
     func testRealtimeVolumeClampsAndPublishesChanges() {
         let volume = RealtimeVolume(0.4)
         XCTAssertEqual(volume.value, 0.4, accuracy: 0.0001)
@@ -109,6 +147,58 @@ final class SourceSoundTests: XCTestCase {
         XCTAssertEqual(status, noErr)
         XCTAssertEqual(output, [0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4])
         XCTAssertFalse(output.suffix(2).allSatisfy { $0 == 0 })
+    }
+
+    func testRealtimeRingBufferAppliesInitialSynchronizationDelay() {
+        let ring = RealtimeAudioRingBuffer(
+            capacityFrames: 16,
+            channels: 2,
+            initialGain: 1,
+            initialDelayFrames: 3
+        )
+        var input: [Float] = [
+            0.2, -0.2,
+            0.4, -0.4,
+            0.6, -0.6,
+            0.8, -0.8,
+            1.0, -1.0,
+            0.8, -0.8,
+            0.6, -0.6,
+            0.4, -0.4
+        ]
+        var output = Array(repeating: Float.zero, count: 8)
+
+        input.withUnsafeMutableBufferPointer { pointer in
+            ring.write(AudioBuffer(pointer, numberOfChannels: 2))
+        }
+        let status = output.withUnsafeMutableBufferPointer { pointer -> OSStatus in
+            var outputList = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(pointer, numberOfChannels: 2)
+            )
+            return ring.render(frameCount: 4, to: &outputList, targetGain: 1)
+        }
+
+        XCTAssertEqual(status, noErr)
+        XCTAssertEqual(output, [0, 0, 0, 0, 0, 0, 0.2, -0.2])
+    }
+
+    func testSynchronizationDelayAlignsDifferentPresentationLatencies() {
+        let sampleRate = 48_000.0
+        let latencies = [
+            "built-in": 0.0335,
+            "external": 0.0135
+        ]
+        let delays = AudioRoute.synchronizationDelayFrames(
+            for: latencies,
+            sourceSampleRate: sampleRate
+        )
+
+        XCTAssertEqual(delays["built-in"], 0)
+        XCTAssertEqual(delays["external"], 960)
+        let builtInArrival = latencies["built-in"]! + Double(delays["built-in"]!) / sampleRate
+        let externalArrival = latencies["external"]! + Double(delays["external"]!) / sampleRate
+        XCTAssertEqual(builtInArrival, externalArrival, accuracy: 1 / sampleRate)
     }
 
     func testCaptureAggregateDescriptionContainsOnlyTheTap() {
@@ -508,6 +598,21 @@ final class SourceSoundTests: XCTestCase {
         XCTAssertTrue(mirroredRoute.renderDiagnostics.receivedNonSilentAudio)
         XCTAssertGreaterThan(mirroredCounts[builtInOutput.uid, default: 0], 0)
         XCTAssertGreaterThan(mirroredCounts[externalOutput.uid, default: 0], 0)
+
+        let latencies = mirroredRoute.outputPresentationLatencies
+        let delayFrames = mirroredRoute.outputSynchronizationDelayFrames
+        let sourceRate = mirroredRoute.captureSampleRate
+        let compensatedLatencies = latencies.map { uid, latency in
+            latency + Double(delayFrames[uid, default: 0]) / sourceRate
+        }
+        print("Edge output latencies:", latencies)
+        print("Edge synchronization delays:", delayFrames)
+        XCTAssertGreaterThan(sourceRate, 0)
+        XCTAssertEqual(
+            try XCTUnwrap(compensatedLatencies.max()),
+            try XCTUnwrap(compensatedLatencies.min()),
+            accuracy: 1 / sourceRate
+        )
 
         Thread.sleep(forTimeInterval: 2)
         let callbackCounts = mirroredRoute.outputRenderCallbackCounts

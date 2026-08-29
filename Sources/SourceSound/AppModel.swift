@@ -9,6 +9,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var devices: [AudioOutputDevice] = []
     @Published private(set) var routeStates: [String: RouteState] = [:]
     @Published private(set) var applicationVolumes: [String: Float] = [:]
+    @Published private(set) var pinnedBundleIDs: Set<String> = []
     @Published var searchText = ""
     @Published var lastError: String?
     @Published private(set) var isRefreshing = false
@@ -24,17 +25,21 @@ final class AppModel: ObservableObject {
     private let routeStartTimeout: TimeInterval = 8
     private let preferencesKey = "SourceSound.RoutingChoices"
     private let volumePreferencesKey = "SourceSound.ApplicationVolumes"
+    private let pinnedApplicationsKey = "SourceSound.PinnedApplications"
     private let logger = Logger(subsystem: "app.sourcesound.mac", category: "Routing")
 
     private static let legacyBundleID = "app.soundsource.mac"
     private static let legacyPreferencesKey = "SoundSource.RoutingChoices"
 
     var filteredApplications: [AudioApplication] {
-        guard !searchText.isEmpty else { return applications }
-        return applications.filter {
+        let matchingApplications = searchText.isEmpty ? applications : applications.filter {
             $0.name.localizedCaseInsensitiveContains(searchText) ||
             $0.bundleID.localizedCaseInsensitiveContains(searchText)
         }
+        return ApplicationListOrdering.pinnedFirst(
+            matchingApplications,
+            pinnedBundleIDs: pinnedBundleIDs
+        )
     }
 
     var activeRouteCount: Int {
@@ -44,6 +49,9 @@ final class AppModel: ObservableObject {
     init() {
         migrateLegacyPreferencesIfNeeded()
         applicationVolumes = savedVolumes()
+        pinnedBundleIDs = PinnedApplicationPreferences.decode(
+            UserDefaults.standard.stringArray(forKey: pinnedApplicationsKey)
+        )
 
         // Construct the first SwiftUI window before restoring saved Core Audio
         // routes. Creating a tap or opening a hardware device can block while a
@@ -104,6 +112,22 @@ final class AppModel: ObservableObject {
             forKey: volumePreferencesKey
         )
         activeRoutes[application.bundleID]?.volume = volume
+    }
+
+    func isPinned(_ application: AudioApplication) -> Bool {
+        pinnedBundleIDs.contains(application.bundleID)
+    }
+
+    func togglePin(for application: AudioApplication) {
+        if pinnedBundleIDs.contains(application.bundleID) {
+            pinnedBundleIDs.remove(application.bundleID)
+        } else {
+            pinnedBundleIDs.insert(application.bundleID)
+        }
+        UserDefaults.standard.set(
+            PinnedApplicationPreferences.encode(pinnedBundleIDs),
+            forKey: pinnedApplicationsKey
+        )
     }
 
     func toggle(deviceUID: String, for application: AudioApplication) {

@@ -478,21 +478,43 @@ final class RealtimeAudioRingBuffer {
     private let readIndex = RealtimeUInt32()
     private let writeIndex = RealtimeUInt32()
     private var isPrimed = false
+    private var remainingInitialDelayFrames: Int
     private var currentGain: Float
 
-    init(capacityFrames: Int = 32_768, channels: Int, initialGain: Float) {
+    init(
+        capacityFrames: Int = 32_768,
+        channels: Int,
+        initialGain: Float,
+        initialDelayFrames: Int = 0
+    ) {
         precondition(capacityFrames > 0 && capacityFrames < Int(UInt32.max / 2))
         precondition(channels > 0)
         self.capacityFrames = capacityFrames
         self.channels = channels
+        remainingInitialDelayFrames = Self.clampedDelayFrames(
+            initialDelayFrames,
+            capacityFrames: capacityFrames
+        )
         currentGain = min(max(initialGain, 0), 1)
         samples = .allocate(capacity: capacityFrames * channels)
         samples.initialize(repeating: 0, count: capacityFrames * channels)
     }
 
+    func configureInitialDelayFrames(_ frames: Int) {
+        remainingInitialDelayFrames = Self.clampedDelayFrames(
+            frames,
+            capacityFrames: capacityFrames
+        )
+    }
+
     deinit {
         samples.deinitialize(count: capacityFrames * channels)
         samples.deallocate()
+    }
+
+    private static func clampedDelayFrames(_ frames: Int, capacityFrames: Int) -> Int {
+        let reserveFrames = min(8_192, max(1, capacityFrames / 2))
+        return max(0, min(frames, capacityFrames - reserveFrames))
     }
 
     func write(_ buffer: AudioBuffer) {
@@ -551,7 +573,12 @@ final class RealtimeAudioRingBuffer {
             isPrimed = true
         }
 
-        let readableFrames = min(frameCount, availableFrames)
+        let leadingSilenceFrames = min(frameCount, remainingInitialDelayFrames)
+        remainingInitialDelayFrames -= leadingSilenceFrames
+        let requestedAudioFrames = frameCount - leadingSilenceFrames
+        guard requestedAudioFrames > 0 else { return noErr }
+
+        let readableFrames = min(requestedAudioFrames, availableFrames)
         guard readableFrames > 0 else {
             isPrimed = false
             return noErr
@@ -569,7 +596,7 @@ final class RealtimeAudioRingBuffer {
                 let frameGain = currentGain + gainStep * Float(frame + 1)
                 for channel in 0..<outputChannels {
                     let sourceChannel = min(channel, channels - 1)
-                    destination[frame * outputChannels + channel]
+                    destination[(leadingSilenceFrames + frame) * outputChannels + channel]
                         = samples[sourceFrame * channels + sourceChannel] * frameGain
                 }
             }
@@ -581,14 +608,15 @@ final class RealtimeAudioRingBuffer {
                 for channel in 0..<outputChannels {
                     guard let destination = buffers[channel].mData?
                         .assumingMemoryBound(to: Float.self) else { continue }
-                    destination[frame] = samples[sourceFrame * channels + channel] * frameGain
+                    destination[leadingSilenceFrames + frame]
+                        = samples[sourceFrame * channels + channel] * frameGain
                 }
             }
         }
 
         currentGain = gain
         readIndex.storeRelease(read &+ UInt32(readableFrames))
-        if readableFrames < frameCount { isPrimed = false }
+        if readableFrames < requestedAudioFrames { isPrimed = false }
         return noErr
     }
 }
@@ -605,6 +633,8 @@ private let sourceSoundHardwareOutputCallback: AURenderCallback = {
 final class HardwareAudioOutput {
     let device: AudioOutputDevice
     let ringBuffer: RealtimeAudioRingBuffer
+    private(set) var presentationLatencySeconds: TimeInterval
+    private(set) var synchronizationDelayFrames: Int
 
     private let volume: RealtimeVolume
     private let diagnosticOutputFrames: RealtimeUInt32?
@@ -620,7 +650,9 @@ final class HardwareAudioOutput {
         device: AudioOutputDevice,
         sourceFormat: AudioStreamBasicDescription,
         volume: RealtimeVolume,
-        diagnosticOutputFrames: RealtimeUInt32?
+        diagnosticOutputFrames: RealtimeUInt32?,
+        presentationLatencySeconds: TimeInterval = 0,
+        synchronizationDelayFrames: Int = 0
     ) throws {
         guard
             sourceFormat.mFormatID == kAudioFormatLinearPCM,
@@ -636,9 +668,19 @@ final class HardwareAudioOutput {
         self.device = device
         self.volume = volume
         self.diagnosticOutputFrames = diagnosticOutputFrames
+        self.presentationLatencySeconds = presentationLatencySeconds
+        self.synchronizationDelayFrames = synchronizationDelayFrames
+        let maximumSynchronizationFrames = Int(sourceFormat.mSampleRate * 5)
+        let ringCapacity = max(
+            32_768,
+            synchronizationDelayFrames + 8_192,
+            maximumSynchronizationFrames + 8_192
+        )
         ringBuffer = RealtimeAudioRingBuffer(
+            capacityFrames: ringCapacity,
             channels: Int(sourceFormat.mChannelsPerFrame),
-            initialGain: volume.value
+            initialGain: volume.value,
+            initialDelayFrames: synchronizationDelayFrames
         )
 
         var componentDescription = AudioComponentDescription(
@@ -708,6 +750,18 @@ final class HardwareAudioOutput {
                 AudioUnitInitialize(newAudioUnit),
                 operation: "Initialize \(device.name)"
             )
+            var audioUnitLatency = TimeInterval.zero
+            var latencySize = UInt32(MemoryLayout<TimeInterval>.size)
+            if AudioUnitGetProperty(
+                newAudioUnit,
+                kAudioUnitProperty_PresentationLatency,
+                kAudioUnitScope_Global,
+                0,
+                &audioUnitLatency,
+                &latencySize
+            ) == noErr, audioUnitLatency.isFinite, audioUnitLatency > 0 {
+                self.presentationLatencySeconds = audioUnitLatency
+            }
         } catch {
             AudioComponentInstanceDispose(newAudioUnit)
             audioUnit = nil
@@ -730,6 +784,11 @@ final class HardwareAudioOutput {
             operation: "Start \(device.name)"
         )
         isRunning = true
+    }
+
+    func configureSynchronizationDelayFrames(_ frames: Int) {
+        synchronizationDelayFrames = max(0, frames)
+        ringBuffer.configureInitialDelayFrames(synchronizationDelayFrames)
     }
 
     func stop() {
@@ -847,6 +906,22 @@ final class AudioRoute {
         Dictionary(uniqueKeysWithValues: hardwareOutputs.map {
             ($0.device.uid, $0.callbackCount)
         })
+    }
+
+    var outputPresentationLatencies: [String: TimeInterval] {
+        Dictionary(uniqueKeysWithValues: hardwareOutputs.map {
+            ($0.device.uid, $0.presentationLatencySeconds)
+        })
+    }
+
+    var outputSynchronizationDelayFrames: [String: Int] {
+        Dictionary(uniqueKeysWithValues: hardwareOutputs.map {
+            ($0.device.uid, $0.synchronizationDelayFrames)
+        })
+    }
+
+    var captureSampleRate: Double {
+        tapInputFormat?.mSampleRate ?? 0
     }
 
     func stop() {
@@ -980,7 +1055,9 @@ final class AudioRoute {
             operation: "Start audio capture"
         )
         isRunning = true
-        for output in hardwareOutputs {
+        for output in hardwareOutputs.sorted(by: {
+            $0.presentationLatencySeconds > $1.presentationLatencySeconds
+        }) {
             try output.start()
         }
     }
@@ -991,13 +1068,44 @@ final class AudioRoute {
             selector: kAudioTapPropertyFormat
         )
         tapInputFormat = inputFormat
+        let latencies = Dictionary(uniqueKeysWithValues: outputDevices.map { device in
+            (device.uid, CoreAudioSystem.outputPresentationLatencySeconds(for: device))
+        })
         hardwareOutputs = try outputDevices.map { device in
             try HardwareAudioOutput(
                 device: device,
                 sourceFormat: inputFormat,
                 volume: realtimeVolume,
-                diagnosticOutputFrames: diagnosticsEnabled ? diagnosticOutputFrames : nil
+                diagnosticOutputFrames: diagnosticsEnabled ? diagnosticOutputFrames : nil,
+                presentationLatencySeconds: latencies[device.uid, default: 0],
+                synchronizationDelayFrames: 0
             )
+        }
+        let connectedLatencies = Dictionary(uniqueKeysWithValues: hardwareOutputs.map {
+            ($0.device.uid, $0.presentationLatencySeconds)
+        })
+        let delayFrames = Self.synchronizationDelayFrames(
+            for: connectedLatencies,
+            sourceSampleRate: inputFormat.mSampleRate
+        )
+        for output in hardwareOutputs {
+            output.configureSynchronizationDelayFrames(
+                delayFrames[output.device.uid, default: 0]
+            )
+        }
+    }
+
+    static func synchronizationDelayFrames(
+        for presentationLatencies: [String: TimeInterval],
+        sourceSampleRate: Double
+    ) -> [String: Int] {
+        guard sourceSampleRate > 0, let maximumLatency = presentationLatencies.values.max() else {
+            return presentationLatencies.mapValues { _ in 0 }
+        }
+        let maximumDelayFrames = Int(sourceSampleRate * 5)
+        return presentationLatencies.mapValues { latency in
+            let delay = max(0, maximumLatency - max(0, latency))
+            return min(maximumDelayFrames, Int((delay * sourceSampleRate).rounded()))
         }
     }
 

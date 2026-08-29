@@ -182,6 +182,23 @@ private struct ApplicationRouteRow: View {
                         .fill(activityColor)
                         .frame(width: 7, height: 7)
                         .help(activityDescription)
+                    Button {
+                        model.togglePin(for: application)
+                    } label: {
+                        Image(systemName: model.isPinned(application) ? "star.fill" : "star")
+                            .foregroundStyle(model.isPinned(application) ? Color.yellow : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(
+                        model.isPinned(application)
+                            ? "Unpin \(application.name)"
+                            : "Pin \(application.name) to the top"
+                    )
+                    .help(
+                        model.isPinned(application)
+                            ? "Unpin \(application.name)"
+                            : "Pin \(application.name) to the top of the app list"
+                    )
                 }
                 HStack(spacing: 5) {
                     Text(activityDescription)
@@ -429,6 +446,8 @@ private struct RoutingHelpView: View {
                 Label("Your audio never leaves this Mac.", systemImage: "lock.shield")
                 Label("On macOS 14–15, a Waiting route activates when playback begins.", systemImage: "clock.arrow.circlepath")
                 Label("Check multiple outputs to play the same app through all of them.", systemImage: "speaker.wave.2.bubble")
+                Label("Mirrored outputs are latency-compensated to play together.", systemImage: "metronome")
+                Label("Star frequently used applications to keep them at the top.", systemImage: "star.fill")
                 Label("Set a separate volume for every routed application.", systemImage: "slider.horizontal.3")
                 Label("Changing back to System Default stops the tap immediately.", systemImage: "arrow.uturn.backward")
                 Label("The first route prompts for System Audio Recording access.", systemImage: "checkmark.shield")
@@ -452,11 +471,12 @@ private struct HowToUseView: View {
 
     private let steps: [(String, String, String)] = [
         ("1", "Connect your outputs", "Connect headphones, speakers, displays, or USB audio devices before selecting them."),
-        ("2", "Choose an app’s outputs", "Open the output menu beside an app. Check one device, or check several to mirror the same audio."),
-        ("3", "Set the app volume", "Use the Volume slider in that app’s row. Each application remembers its own level."),
-        ("4", "Allow audio access", "The first active route asks for System Audio Recording permission. Choose Allow."),
-        ("5", "Start playback", "The status changes to Routed. On macOS 14–15, an idle app may show Waiting until it begins using audio."),
-        ("6", "Return to normal", "Choose System Default to stop that app’s custom route, or use Stop all routes in the sidebar.")
+        ("2", "Pin your favorites", "Select the star beside an application to keep it at the top of the list."),
+        ("3", "Choose an app’s outputs", "Open the output menu beside an app. Check one device, or check several to mirror the same audio."),
+        ("4", "Set the app volume", "Use the Volume slider in that app’s row. Each application remembers its own level."),
+        ("5", "Allow audio access", "The first active route asks for System Audio Recording permission. Choose Allow."),
+        ("6", "Start playback", "The status changes to Routed. On macOS 14–15, an idle app may show Waiting until it begins using audio."),
+        ("7", "Return to normal", "Choose System Default to stop that app’s custom route, or use Stop all routes in the sidebar.")
     ]
 
     var body: some View {
@@ -468,7 +488,7 @@ private struct HowToUseView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("How to use SourceSound")
                         .font(.title2.bold())
-                    Text("Route and mix an app in six quick steps")
+                    Text("Route and mix an app in seven quick steps")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()

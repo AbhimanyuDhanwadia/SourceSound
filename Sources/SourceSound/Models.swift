@@ -116,6 +116,30 @@ enum ApplicationVolumePreferences {
     }
 }
 
+enum PinnedApplicationPreferences {
+    static func decode(_ raw: [String]?) -> Set<String> {
+        Set((raw ?? []).filter { !$0.isEmpty })
+    }
+
+    static func encode(_ bundleIDs: Set<String>) -> [String] {
+        bundleIDs.sorted()
+    }
+}
+
+enum ApplicationListOrdering {
+    static func pinnedFirst(
+        _ applications: [AudioApplication],
+        pinnedBundleIDs: Set<String>
+    ) -> [AudioApplication] {
+        applications.enumerated().sorted { lhs, rhs in
+            let lhsPinned = pinnedBundleIDs.contains(lhs.element.bundleID)
+            let rhsPinned = pinnedBundleIDs.contains(rhs.element.bundleID)
+            if lhsPinned != rhsPinned { return lhsPinned }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+}
+
 enum RouteState: Equatable {
     case inactive
     case waiting(deviceUIDs: Set<String>)
