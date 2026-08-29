@@ -31,10 +31,6 @@ enum CoreAudioSystem {
 
         for processObjectID in processIDs {
             guard
-                let pid: pid_t = try? scalarProperty(
-                    objectID: processObjectID,
-                    selector: kAudioProcessPropertyPID
-                ),
                 let bundleID: String = try? stringProperty(
                     objectID: processObjectID,
                     selector: kAudioProcessPropertyBundleID
@@ -43,16 +39,25 @@ enum CoreAudioSystem {
                 bundleID != Bundle.main.bundleIdentifier
             else { continue }
 
-            let isRunning: UInt32 = (try? scalarProperty(
+            // System-owned audio services such as Safari's WebKit GPU process can
+            // expose their Core Audio object and bundle identifier while refusing
+            // PID and running-state metadata to an ordinary application. The object
+            // ID is still valid for a process tap, so never discard it just because
+            // those optional diagnostic properties are unavailable.
+            let pid: pid_t = (try? scalarProperty(
+                objectID: processObjectID,
+                selector: kAudioProcessPropertyPID
+            )) ?? 0
+            let isRunning: UInt32? = try? scalarProperty(
                 objectID: processObjectID,
                 selector: kAudioProcessPropertyIsRunningOutput
-            )) ?? 0
+            )
 
             let process = AudioProcess(
                 objectID: processObjectID,
                 pid: pid,
                 bundleID: bundleID,
-                isProducingAudio: isRunning != 0
+                isProducingAudio: isRunning == 1
             )
             let ownerBundleID = routingOwnerBundleID(
                 for: bundleID,

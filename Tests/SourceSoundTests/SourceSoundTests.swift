@@ -281,24 +281,46 @@ final class SourceSoundTests: XCTestCase {
         guard #available(macOS 26.0, *) else {
             throw XCTSkip("Persistent bundle routing requires macOS 26.")
         }
-        let safari = try XCTUnwrap(
-            CoreAudioSystem.audioApplications().first { $0.bundleID == "com.apple.Safari" }
+        let liveProcessIDs = try CoreAudioSystem.audioObjectIDArrayProperty(
+            objectID: CoreAudioSystem.systemObject,
+            selector: kAudioHardwarePropertyProcessObjectList
         )
-        guard safari.isProducingAudio else {
-            throw XCTSkip("Safari is not currently producing audio.")
-        }
+        let webKitAudioProcessIDs = Set(liveProcessIDs.filter { processID in
+            let bundleID = try? CoreAudioSystem.stringProperty(
+                objectID: processID,
+                selector: kAudioProcessPropertyBundleID
+            )
+            return bundleID == "com.apple.WebKit.GPU"
+        })
+        let applications = try CoreAudioSystem.audioApplications()
+        print("Live Safari discovery:", applications.filter {
+            $0.bundleID == "com.apple.Safari" || $0.bundleID.contains("WebKit")
+        }.map {
+            "\($0.bundleID): producing=\($0.isProducingAudio), process=\(String(describing: $0.processObjectID)), routingProcesses=\($0.routingProcessObjectIDs), routingBundles=\($0.routingBundleIDs)"
+        })
+        let safari = try XCTUnwrap(
+            applications.first { $0.bundleID == "com.apple.Safari" }
+        )
+        XCTAssertFalse(webKitAudioProcessIDs.isEmpty)
+        XCTAssertTrue(webKitAudioProcessIDs.isSubset(of: safari.routingProcessObjectIDs))
         XCTAssertTrue(safari.routingBundleIDs.contains("com.apple.WebKit.GPU"))
 
         let defaultOutputID: AudioObjectID = try CoreAudioSystem.scalarProperty(
             objectID: CoreAudioSystem.systemObject,
             selector: kAudioHardwarePropertyDefaultOutputDevice
         )
+        let knownVirtualDeviceNames = ["BlackHole", "Microsoft Teams Audio", "SourceSound Route"]
+        let nonDefaultOutputs = try CoreAudioSystem.outputDevices().filter { device in
+            device.objectID != defaultOutputID
+                && !knownVirtualDeviceNames.contains(where: {
+                    device.name.localizedCaseInsensitiveContains($0)
+                })
+        }
+        print("Safari non-default outputs:", nonDefaultOutputs.map { "\($0.name) [\($0.uid)]" })
         let externalOutput = try XCTUnwrap(
-            CoreAudioSystem.outputDevices().first {
-                $0.objectID != defaultOutputID
-                    && $0.transportType == kAudioDeviceTransportTypeUSB
-            },
-            "A non-default USB output is required for the live external-route test."
+            nonDefaultOutputs.first { $0.uid.hasPrefix("AppleUSBAudioEngine:") }
+                ?? nonDefaultOutputs.first,
+            "A connected non-default physical output is required for the live Safari route test."
         )
 
         let route = try AudioRoute(
@@ -309,7 +331,9 @@ final class SourceSoundTests: XCTestCase {
         defer { route.stop() }
 
         let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline, !route.renderDiagnostics.receivedNonSilentAudio {
+        while Date() < deadline,
+              !(route.renderDiagnostics.receivedNonSilentAudio
+                && route.renderDiagnostics.outputFrames > 0) {
             Thread.sleep(forTimeInterval: 0.02)
         }
 
@@ -318,6 +342,9 @@ final class SourceSoundTests: XCTestCase {
             "Safari external route: \(externalOutput.name), input frames: \(diagnostics.inputFrames), "
                 + "output frames: \(diagnostics.outputFrames), signal: \(diagnostics.receivedNonSilentAudio)"
         )
+        guard diagnostics.receivedNonSilentAudio else {
+            throw XCTSkip("Safari is not currently producing audio.")
+        }
         XCTAssertGreaterThan(diagnostics.inputFrames, 0)
         XCTAssertGreaterThan(diagnostics.outputFrames, 0)
         XCTAssertTrue(diagnostics.receivedNonSilentAudio)

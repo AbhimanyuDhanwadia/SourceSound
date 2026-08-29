@@ -16,6 +16,7 @@ SourceSound is a native macOS application for routing each app to one or more au
 - Synchronize each output with a lock-free real-time ring buffer while Core Audio handles that device's clock and sample-rate conversion.
 - Remember routes by application bundle identifier and restore them after relaunch.
 - Group Chromium and WebKit audio helpers with their visible browser, including Microsoft Edge and Safari.
+- Retain system-owned browser audio services when macOS exposes their Core Audio identity but withholds PID metadata.
 - Configure idle applications before playback starts on macOS 26.
 - Run entirely on the Mac; SourceSound does not record or upload audio.
 
@@ -54,7 +55,7 @@ Create a distributable disk image:
 
 ```sh
 make dmg
-open dist/SourceSound-1.7.dmg
+open dist/SourceSound-1.8.dmg
 ```
 
 You can also open `Package.swift` directly in Xcode. Testing through the generated `.app` bundle is recommended because it includes the required audio-capture privacy description.
@@ -80,7 +81,7 @@ Every selected speaker or headphone is opened directly through its own Core Audi
 
 Per-app volume is stored independently and delivered to the audio callback through a lock-free C11 atomic. A short gain ramp is applied across each buffer whenever the slider changes, preventing abrupt changes from producing clicks.
 
-Audio service and helper process identifiers are grouped with their visible parent application. This is required for Chromium browsers such as Microsoft Edge, whose audio is produced by `com.microsoft.edgemac.helper`, and Safari, whose audio is produced by `com.apple.WebKit.GPU`. Active routes rebuild automatically when a browser helper starts or restarts.
+Audio service and helper process identifiers are grouped with their visible parent application. This is required for Chromium browsers such as Microsoft Edge, whose audio is produced by `com.microsoft.edgemac.helper`, and Safari, whose audio is produced by `com.apple.WebKit.GPU`. SourceSound keeps the Core Audio object routable even when macOS withholds optional PID or running-state metadata for a system-owned WebKit service. Active routes rebuild automatically when a browser helper starts or restarts.
 
 ## Project structure
 
