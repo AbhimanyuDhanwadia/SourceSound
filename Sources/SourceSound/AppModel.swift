@@ -22,6 +22,10 @@ final class AppModel: ObservableObject {
         qos: .userInitiated,
         attributes: .concurrent
     )
+    private let refreshQueue = DispatchQueue(
+        label: "app.sourcesound.device-refresh",
+        qos: .userInitiated
+    )
     private let routeStartTimeout: TimeInterval = 8
     private let preferencesKey = "SourceSound.RoutingChoices"
     private let volumePreferencesKey = "SourceSound.ApplicationVolumes"
@@ -80,15 +84,28 @@ final class AppModel: ObservableObject {
     func refresh(silent: Bool = false) {
         guard !isRefreshing else { return }
         isRefreshing = true
-        defer { isRefreshing = false }
 
-        do {
-            applications = try CoreAudioSystem.audioApplications()
-            devices = try CoreAudioSystem.outputDevices()
-            reconcileRoutes()
-            if !silent { lastError = nil }
-        } catch {
-            if !silent { lastError = error.localizedDescription }
+        refreshQueue.async { [weak self] in
+            let result = Result {
+                (
+                    try CoreAudioSystem.audioApplications(),
+                    try CoreAudioSystem.outputDevices()
+                )
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isRefreshing = false
+                switch result {
+                case let .success((applications, devices)):
+                    self.applications = applications
+                    self.devices = devices
+                    self.reconcileRoutes()
+                    if !silent { self.lastError = nil }
+                case let .failure(error):
+                    if !silent { self.lastError = error.localizedDescription }
+                }
+            }
         }
     }
 
